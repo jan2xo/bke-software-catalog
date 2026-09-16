@@ -64,8 +64,9 @@ jobs:
           if (!(Select-String -LiteralPath src/bke_licensing_agent/version.py -SimpleMatch '1.0.1')) { throw '1.0.1 source identity missing' }
           if (!(Select-String -LiteralPath src/bke_licensing_agent/broadcasts.py -SimpleMatch 'bke.product-broadcasts')) { throw 'Product broadcast synchronizer missing' }
           if (!(Select-String -LiteralPath src/bke_licensing_agent/notifications.py -SimpleMatch 'FREE_SUPPORT_ENDED')) { throw 'Typed broadcast codes missing' }
+          if (!(Select-String -LiteralPath packaging/windows/bke-licensing-agent.iss -SimpleMatch '$processGone')) { throw 'Service-process exit hardening missing' }
 
-      - name: Run notification and self-update focused tests
+      - name: Run notification, replacement and self-update focused tests
         shell: pwsh
         working-directory: agent
         run: |
@@ -73,6 +74,7 @@ jobs:
             tests/unit/test_product_broadcast_sync.py `
             tests/unit/test_notification_feed_provider.py `
             tests/unit/test_notifications.py `
+            tests/unit/test_windows_privileged_packaging.py `
             tests/unit/test_self_update.py `
             tests/unit/test_native_license_center_launcher.py
 
@@ -199,7 +201,7 @@ jobs:
           $notes = @"
           BKE Licensing Agent 1.0.1 Notification UTM Test
 
-          Disposable UTM build for typed Digital Solutions product-broadcast ingestion.
+          Disposable UTM build for typed Digital Solutions product-broadcast ingestion and verified service-process shutdown before in-place payload replacement.
           Source ref: $env:AGENT_REF
           Source SHA: $env:AGENT_SOURCE_SHA
 
