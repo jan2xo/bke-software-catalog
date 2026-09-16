@@ -1,0 +1,188 @@
+name: Publish Licensing Agent 0.0.0 UTM test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish-agent-0.0.0-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  AGENT_REF: test/agent-self-update-0.0.0
+  RELEASE_VERSION: "0.0.0"
+  RELEASE_TAG: bke-licensing-agent-v0.0.0-test
+  ASSET_NAME: BKE-Licensing-Agent-0.0.0-Windows-x64.exe
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Agent 0.0.0 source
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:AGENT_REF https://github.com/jan2xo/bke-licensing-agent.git agent
+          $sourceSha = (git -C agent rev-parse HEAD).Trim()
+          "AGENT_SOURCE_SHA=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Agent source: $sourceSha"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        shell: pwsh
+        working-directory: agent
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install -e ".[test]"
+
+      - name: Verify 0.0.0 source identity
+        shell: pwsh
+        working-directory: agent
+        run: |
+          python -c "import importlib.metadata as m; assert m.version('bke-licensing-agent') == '0.0.0'; print(m.version('bke-licensing-agent'))"
+          if (!(Select-String -LiteralPath src/bke_licensing_agent/version.py -SimpleMatch '__version__ = \"0.0.0\"')) { throw '0.0.0 source identity missing' }
+
+      - name: Run self-update focused tests
+        shell: pwsh
+        working-directory: agent
+        run: python -m pytest -q tests/unit/test_self_update.py tests/unit/test_native_license_center_launcher.py
+
+      - name: Freeze Windows service and License Center
+        shell: pwsh
+        working-directory: agent
+        run: |
+          New-Item -ItemType Directory -Force dist/windows | Out-Null
+          pyinstaller --clean --noconfirm --hidden-import win32timezone --name bke-licensing-agent-service packaging/windows/service_entry.py
+          Move-Item dist/bke-licensing-agent-service dist/windows/bke-licensing-agent-service
+          pyinstaller --clean --noconfirm bke-license-center.spec
+          Move-Item dist/bke-license-center dist/windows/bke-license-center
+
+      - name: Freeze updater helper and provisioner
+        shell: pwsh
+        working-directory: agent
+        run: |
+          pyinstaller --clean --noconfirm --onefile --name bke-updater-core packaging/windows/updater_core_entry.py
+          New-Item -ItemType Directory -Force dist/windows/bke-updater-core | Out-Null
+          Move-Item dist/bke-updater-core.exe dist/windows/bke-updater-core/bke-updater-core.exe
+          pyinstaller --clean --noconfirm --onefile --name bke-privileged-provisioner packaging/windows/provision_privileged_runtime.py
+          New-Item -ItemType Directory -Force dist/windows/bke-privileged-provisioner | Out-Null
+          Move-Item dist/bke-privileged-provisioner.exe dist/windows/bke-privileged-provisioner/bke-privileged-provisioner.exe
+
+      - name: Smoke frozen entry points
+        shell: pwsh
+        working-directory: agent
+        run: |
+          dist/windows/bke-licensing-agent-service/bke-licensing-agent-service.exe --smoke
+          dist/windows/bke-licensing-agent-service/bke-licensing-agent-service.exe --service-smoke
+          dist/windows/bke-licensing-agent-service/bke-licensing-agent-service.exe --service-host-smoke
+          dist/windows/bke-license-center/bke-license-center.exe --smoke
+          dist/windows/bke-updater-core/bke-updater-core.exe --help
+
+      - name: Generate disposable test target trust
+        shell: pwsh
+        working-directory: agent
+        run: |
+          New-Item -ItemType Directory -Force dist/windows/privileged-payload/target-keys | Out-Null
+          New-Item -ItemType Directory -Force dist/windows/privileged-payload/target-policies | Out-Null
+          @'
+          import base64, json
+          from pathlib import Path
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+          root = Path('dist/windows/privileged-payload')
+          private = Ed25519PrivateKey.generate()
+          public = private.public_key()
+          key_id = 'utm-test-target-v1'
+          (root / 'target-keys' / f'{key_id}.pem').write_bytes(public.public_bytes(
+              serialization.Encoding.PEM,
+              serialization.PublicFormat.SubjectPublicKeyInfo,
+          ))
+          unsigned = {
+              'schema': 'bke.install-target-policy.v1',
+              'policy_id': 'utm-self-update-test',
+              'revision': 1,
+              'product_id': 'bke-certification-product',
+              'platform': 'windows',
+              'architecture': 'x86_64',
+              'install_root': r'C:\\Program Files\\BKE Digital Solutions\\Certification Product',
+              'entry_point': 'product.exe',
+              'signing_key_id': key_id,
+              'algorithm': 'Ed25519',
+          }
+          canonical = json.dumps(unsigned, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+          document = dict(unsigned)
+          document['signature'] = base64.b64encode(private.sign(canonical)).decode('ascii')
+          (root / 'target-policies' / 'utm-self-update-test.json').write_text(
+              json.dumps(document, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          '@ | python -
+
+      - name: Build 0.0.0 Inno Setup installer
+        shell: pwsh
+        working-directory: agent
+        run: |
+          $iss = 'packaging/windows/bke-licensing-agent.iss'
+          $content = Get-Content $iss -Raw
+          $content = $content.Replace('#define AppVersion "1.0.0"', '#define AppVersion "0.0.0"')
+          Set-Content -LiteralPath $iss -Value $content -Encoding utf8
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" $iss
+
+      - name: Verify and hash installer
+        shell: pwsh
+        working-directory: agent
+        run: |
+          $installer = "dist/installer/$env:ASSET_NAME"
+          if (!(Test-Path $installer)) { throw "0.0.0 installer missing" }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          "${hash}  $env:ASSET_NAME" | Set-Content -Encoding ascii dist/installer/SHA256SUMS.txt
+          "source_repo=jan2xo/bke-licensing-agent`nsource_ref=$env:AGENT_REF`nsource_sha=$env:AGENT_SOURCE_SHA" | Set-Content -Encoding ascii dist/installer/SOURCE.txt
+          Get-Item $installer | Select-Object Name,Length
+          Get-Content dist/installer/SHA256SUMS.txt
+
+      - name: Scan installer with Microsoft Defender
+        shell: pwsh
+        working-directory: agent
+        run: |
+          $installer = (Resolve-Path "dist/installer/$env:ASSET_NAME").Path
+          $platformRoot = Join-Path $env:ProgramData 'Microsoft\Windows Defender\Platform'
+          $mpCmd = Get-ChildItem -Path $platformRoot -Filter MpCmdRun.exe -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($null -eq $mpCmd) {
+            $fallback = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+            if (Test-Path $fallback) { $mpCmd = Get-Item $fallback }
+          }
+          if ($null -eq $mpCmd) { throw 'Microsoft Defender scanner unavailable' }
+          & $mpCmd.FullName -Scan -ScanType 3 -File $installer -DisableRemediation
+          if ($LASTEXITCODE -ne 0) { throw "Microsoft Defender scan failed or detected a threat (exit $LASTEXITCODE)" }
+
+      - name: Publish test prerelease to BKE Software Catalog
+        shell: pwsh
+        working-directory: agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: jan2xo/bke-software-catalog
+        run: |
+          $installer = "dist/installer/$env:ASSET_NAME"
+          $sha = "dist/installer/SHA256SUMS.txt"
+          $source = "dist/installer/SOURCE.txt"
+          $notes = @"
+          Test-only BKE Licensing Agent 0.0.0 installer for the UTM self-update probe.
+
+          Source repository: jan2xo/bke-licensing-agent
+          Source ref: $env:AGENT_REF
+          Source SHA: $env:AGENT_SOURCE_SHA
+
+          This is not a production release. It exists only to verify 0.0.0 -> 1.0.0 update discovery, notification, download, and in-place installer handoff.
+          "@
+          gh release view $env:RELEASE_TAG --repo $env:GH_REPO *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $installer $sha $source --clobber --repo $env:GH_REPO
+          } else {
+            gh release create $env:RELEASE_TAG $installer $sha $source --repo $env:GH_REPO --target main --title "BKE Licensing Agent 0.0.0 UTM Test" --notes $notes --prerelease
+          }
