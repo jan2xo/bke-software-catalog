@@ -45,7 +45,7 @@ jobs:
         working-directory: agent
         run: |
           python -c "import importlib.metadata as m; assert m.version('bke-licensing-agent') == '0.0.0'; print(m.version('bke-licensing-agent'))"
-          if (!(Select-String -LiteralPath src/bke_licensing_agent/version.py -SimpleMatch '__version__ = \"0.0.0\"')) { throw '0.0.0 source identity missing' }
+          if (!(Select-String -LiteralPath src/bke_licensing_agent/version.py -SimpleMatch '__version__ = "0.0.0"')) { throw '0.0.0 source identity missing' }
 
       - name: Run self-update focused tests
         shell: pwsh
