@@ -1,0 +1,107 @@
+name: PR Guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  publication-policy:
+    name: Agent publication contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify intentional PREPRODUCTION publication policy
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path(".github/workflows/publish-agent-preproduction.yml")
+          if not path.is_file():
+              raise SystemExit("Agent PREPRODUCTION publication workflow is missing.")
+
+          text = path.read_text(encoding="utf-8")
+
+          required = [
+              "workflow_dispatch:",
+              "agent_source_sha:",
+              "agent_certification_run_id:",
+              "installer_artifact_id:",
+              "expected_version:",
+              "expected_sha256:",
+              "expected_bytes:",
+              "authorization:",
+              "permissions:",
+              "contents: write",
+              "jan2xo/bke-licensing-agent",
+              "installer / Required installer certification",
+              "Required certification",
+              "agent-installer-package",
+              "actions/download-artifact@v4",
+              "artifact-ids:",
+              "AGENT_ARTIFACT_READ_TOKEN",
+              "bke.agent-installer-package.v2",
+              'status == "PREPRODUCTION"',
+              "production_ready == false",
+              'trust == "DISPOSABLE_PREPRODUCTION"',
+              "PUBLISH_AGENT_PREPRODUCTION",
+              "overwrite is forbidden",
+              "prerelease: true",
+              'make_latest: "false"',
+              "gh release upload",
+              "gh release download",
+              "Published release SHA-256 does not match certified installer.",
+              "Published release byte count does not match certified installer.",
+          ]
+          missing = [token for token in required if token not in text]
+          if missing:
+              raise SystemExit(
+                  "Publication workflow is missing required policy tokens: "
+                  + ", ".join(missing)
+              )
+
+          forbidden_triggers = [
+              "\n  push:",
+              "\n  pull_request:",
+              "\n  workflow_run:",
+              "\n  schedule:",
+          ]
+          present_triggers = [
+              token.strip() for token in forbidden_triggers if token in text
+          ]
+          if present_triggers:
+              raise SystemExit(
+                  "Publication workflow gained an automatic trigger: "
+                  + ", ".join(present_triggers)
+              )
+
+          forbidden_build_or_overwrite = [
+              "git clone",
+              "actions/setup-dotnet",
+              "dotnet build",
+              "dotnet publish",
+              "msbuild",
+              "ISCC.exe",
+              "choco install",
+              "--clobber",
+              "release upload --clobber",
+          ]
+          present_forbidden = [
+              token for token in forbidden_build_or_overwrite
+              if token.lower() in text.lower()
+          ]
+          if present_forbidden:
+              raise SystemExit(
+                  "Catalog publication must consume certified bytes, not rebuild/overwrite: "
+                  + ", ".join(present_forbidden)
+              )
+
+          if text.count("workflow_dispatch:") != 1:
+              raise SystemExit(
+                  "Publication workflow must have exactly one workflow_dispatch trigger."
+              )
+
+          print("Software Catalog Agent PREPRODUCTION publication policy: PASS")
