@@ -1,0 +1,357 @@
+name: Publish Agent PREPRODUCTION release
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent_source_sha:
+        description: Exact certified bke-licensing-agent source SHA
+        required: true
+        type: string
+      agent_certification_run_id:
+        description: Successful Agent Intent Certification run ID
+        required: true
+        type: string
+      installer_artifact_id:
+        description: Exact agent-installer-package artifact ID from that run
+        required: true
+        type: string
+      expected_version:
+        description: Exact Agent version carried by PACKAGE-MANIFEST.json
+        required: true
+        type: string
+      expected_sha256:
+        description: Exact lowercase SHA-256 of the installer bytes
+        required: true
+        type: string
+      expected_bytes:
+        description: Exact installer byte count
+        required: true
+        type: string
+      authorization:
+        description: Exact PREPRODUCTION publication authorization token
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-preproduction-publication-${{ inputs.expected_version }}
+  cancel-in-progress: false
+
+env:
+  AGENT_REPOSITORY: jan2xo/bke-licensing-agent
+  EXPECTED_ARTIFACT_NAME: agent-installer-package
+
+jobs:
+  publish:
+    name: Verify certified bytes and publish prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate exact certification provenance
+        shell: bash
+        env:
+          AGENT_SOURCE_SHA: ${{ inputs.agent_source_sha }}
+          AGENT_CERTIFICATION_RUN_ID: ${{ inputs.agent_certification_run_id }}
+          INSTALLER_ARTIFACT_ID: ${{ inputs.installer_artifact_id }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          EXPECTED_BYTES: ${{ inputs.expected_bytes }}
+        run: |
+          set -euo pipefail
+
+          [[ "$AGENT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Agent source SHA must be an exact lowercase 40-character SHA." >&2
+            exit 1
+          }
+          [[ "$AGENT_CERTIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || {
+            echo "Agent certification run ID must be numeric." >&2
+            exit 1
+          }
+          [[ "$INSTALLER_ARTIFACT_ID" =~ ^[0-9]+$ ]] || {
+            echo "Installer artifact ID must be numeric." >&2
+            exit 1
+          }
+          [[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Expected version must be a stable x.y.z version." >&2
+            exit 1
+          }
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Expected installer SHA-256 must be lowercase hexadecimal." >&2
+            exit 1
+          }
+          [[ "$EXPECTED_BYTES" =~ ^[1-9][0-9]*$ ]] || {
+            echo "Expected installer bytes must be a positive integer." >&2
+            exit 1
+          }
+
+          api="https://api.github.com/repos/$AGENT_REPOSITORY"
+          headers=(
+            -H "Accept: application/vnd.github+json"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+            -H "User-Agent: bke-software-catalog"
+          )
+
+          curl -fsSL "${headers[@]}"             "$api/actions/runs/$AGENT_CERTIFICATION_RUN_ID"             -o /tmp/agent-run.json
+
+          jq -e             --arg sha "$AGENT_SOURCE_SHA"             '.repository.full_name == "jan2xo/bke-licensing-agent"
+             and .path == ".github/workflows/certify.yml"
+             and .status == "completed"
+             and .conclusion == "success"
+             and .head_sha == $sha'             /tmp/agent-run.json >/dev/null || {
+              echo "Agent certification run does not prove the requested exact source SHA." >&2
+              exit 1
+            }
+
+          curl -fsSL "${headers[@]}"             "$api/actions/runs/$AGENT_CERTIFICATION_RUN_ID/jobs?per_page=100"             -o /tmp/agent-jobs.json
+
+          jq -e             'any(.jobs[]; .name == "installer / Required installer certification"
+              and .status == "completed"
+              and .conclusion == "success")'             /tmp/agent-jobs.json >/dev/null || {
+              echo "Required Agent installer certification job is not PASS." >&2
+              exit 1
+            }
+
+          jq -e             'any(.jobs[]; .name == "Required certification"
+              and .status == "completed"
+              and .conclusion == "success")'             /tmp/agent-jobs.json >/dev/null || {
+              echo "Agent aggregate required-certification is not PASS." >&2
+              exit 1
+            }
+
+          curl -fsSL "${headers[@]}"             "$api/actions/artifacts/$INSTALLER_ARTIFACT_ID"             -o /tmp/agent-artifact.json
+
+          jq -e             --argjson run "$AGENT_CERTIFICATION_RUN_ID"             --arg sha "$AGENT_SOURCE_SHA"             --arg name "$EXPECTED_ARTIFACT_NAME"             '.name == $name
+             and .expired == false
+             and .workflow_run.id == $run
+             and .workflow_run.head_sha == $sha'             /tmp/agent-artifact.json >/dev/null || {
+              echo "Installer artifact identity does not match the certified Agent run." >&2
+              exit 1
+            }
+
+      - name: Download exact certified Agent artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: jan2xo/bke-licensing-agent
+          run-id: ${{ inputs.agent_certification_run_id }}
+          artifact-ids: ${{ inputs.installer_artifact_id }}
+          github-token: ${{ secrets.AGENT_ARTIFACT_READ_TOKEN }}
+          path: incoming
+
+      - name: Verify immutable installer package
+        id: package
+        shell: bash
+        env:
+          AGENT_SOURCE_SHA: ${{ inputs.agent_source_sha }}
+          AGENT_CERTIFICATION_RUN_ID: ${{ inputs.agent_certification_run_id }}
+          INSTALLER_ARTIFACT_ID: ${{ inputs.installer_artifact_id }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          EXPECTED_BYTES: ${{ inputs.expected_bytes }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t files < <(find incoming -type f -print | sort)
+          [[ "${#files[@]}" -eq 2 ]] || {
+            printf 'Expected exactly two files in certified package, found %s\n' "${#files[@]}" >&2
+            printf '%s\n' "${files[@]}" >&2
+            exit 1
+          }
+
+          mapfile -t manifests < <(find incoming -type f -name PACKAGE-MANIFEST.json -print)
+          [[ "${#manifests[@]}" -eq 1 ]] || {
+            echo "Certified package must contain exactly one PACKAGE-MANIFEST.json." >&2
+            exit 1
+          }
+          manifest="${manifests[0]}"
+
+          asset_name="BKE-Licensing-Agent-${EXPECTED_VERSION}-Windows-x64.exe"
+          mapfile -t installers < <(find incoming -type f -name "$asset_name" -print)
+          [[ "${#installers[@]}" -eq 1 ]] || {
+            echo "Certified package must contain exactly one $asset_name." >&2
+            exit 1
+          }
+          installer="${installers[0]}"
+
+          jq -e             --arg sha "$AGENT_SOURCE_SHA"             --arg version "$EXPECTED_VERSION"             --arg file "$asset_name"             --arg hash "$EXPECTED_SHA256"             --argjson bytes "$EXPECTED_BYTES"             '.schema == "bke.agent-installer-package.v2"
+             and .status == "PREPRODUCTION"
+             and .production_ready == false
+             and .source_sha == $sha
+             and .version == $version
+             and .trust == "DISPOSABLE_PREPRODUCTION"
+             and .platform == "windows"
+             and .application_architecture == "x64"
+             and .hardware_architecture_selection == "NONE"
+             and .installer.file == $file
+             and .installer.sha256 == $hash
+             and .installer.bytes == $bytes'             "$manifest" >/dev/null || {
+              echo "Agent package manifest does not match the requested PREPRODUCTION provenance." >&2
+              exit 1
+            }
+
+          actual_sha="$(sha256sum "$installer" | awk '{print $1}')"
+          actual_bytes="$(stat -c '%s' "$installer")"
+          [[ "$actual_sha" == "$EXPECTED_SHA256" ]] || {
+            echo "Installer SHA-256 drifted after artifact download." >&2
+            exit 1
+          }
+          [[ "$actual_bytes" == "$EXPECTED_BYTES" ]] || {
+            echo "Installer byte count drifted after artifact download." >&2
+            exit 1
+          }
+
+          tag="bke-licensing-agent-v$EXPECTED_VERSION"
+          {
+            echo "installer=$installer"
+            echo "asset_name=$asset_name"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require explicit PREPRODUCTION publication authorization
+        shell: bash
+        env:
+          AUTHORIZATION: ${{ inputs.authorization }}
+        run: |
+          set -euo pipefail
+          [[ "$AUTHORIZATION" == "PUBLISH_AGENT_PREPRODUCTION" ]] || {
+            echo "Exact PREPRODUCTION publication authorization token is required." >&2
+            exit 1
+          }
+
+      - name: Refuse existing release or tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          release_status="$(curl -sS -o /tmp/existing-release.json -w '%{http_code}'             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer $GH_TOKEN"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          if [[ "$release_status" == "200" ]]; then
+            echo "Release $TAG already exists; overwrite is forbidden." >&2
+            exit 1
+          fi
+          [[ "$release_status" == "404" ]] || {
+            echo "Could not prove release absence for $TAG (HTTP $release_status)." >&2
+            exit 1
+          }
+
+          tag_status="$(curl -sS -o /tmp/existing-tag.json -w '%{http_code}'             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer $GH_TOKEN"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")"
+          if [[ "$tag_status" == "200" ]]; then
+            echo "Git tag $TAG already exists; overwrite is forbidden." >&2
+            exit 1
+          fi
+          [[ "$tag_status" == "404" ]] || {
+            echo "Could not prove tag absence for $TAG (HTTP $tag_status)." >&2
+            exit 1
+          }
+
+      - name: Publish immutable PREPRODUCTION prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+          INSTALLER: ${{ steps.package.outputs.installer }}
+          ASSET_NAME: ${{ steps.package.outputs.asset_name }}
+          AGENT_SOURCE_SHA: ${{ inputs.agent_source_sha }}
+          AGENT_CERTIFICATION_RUN_ID: ${{ inputs.agent_certification_run_id }}
+          INSTALLER_ARTIFACT_ID: ${{ inputs.installer_artifact_id }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+          EXPECTED_BYTES: ${{ inputs.expected_bytes }}
+        run: |
+          set -euo pipefail
+
+          created=0
+          verified=0
+          cleanup() {
+            if [[ "$created" == "1" && "$verified" != "1" ]]; then
+              echo "Publication verification failed; removing release created by this run." >&2
+              gh release delete "$TAG"                 --repo "$GITHUB_REPOSITORY"                 --yes                 --cleanup-tag || true
+            fi
+          }
+          trap cleanup EXIT
+
+          cat > /tmp/release-notes.md <<EOF
+          BKE Licensing Agent $EXPECTED_VERSION PREPRODUCTION
+
+          status=PREPRODUCTION
+          production_ready=false
+          source_repository=$AGENT_REPOSITORY
+          source_sha=$AGENT_SOURCE_SHA
+          certification_run_id=$AGENT_CERTIFICATION_RUN_ID
+          installer_artifact_id=$INSTALLER_ARTIFACT_ID
+          installer_sha256=$EXPECTED_SHA256
+          installer_bytes=$EXPECTED_BYTES
+
+          These bytes were consumed from the exact certified Agent installer artifact. The Software Catalog did not rebuild them.
+          EOF
+
+          jq -n             --arg tag "$TAG"             --arg name "BKE Licensing Agent $EXPECTED_VERSION PREPRODUCTION"             --rawfile body /tmp/release-notes.md             '{
+              tag_name: $tag,
+              target_commitish: "main",
+              name: $name,
+              body: $body,
+              draft: false,
+              prerelease: true,
+              generate_release_notes: false,
+              make_latest: "false"
+            }' > /tmp/release.json
+
+          gh api             --method POST             "repos/$GITHUB_REPOSITORY/releases"             --input /tmp/release.json             > /tmp/created-release.json
+          created=1
+
+          gh release upload "$TAG" "$INSTALLER"             --repo "$GITHUB_REPOSITORY"
+
+          mkdir -p /tmp/redownload
+          gh release download "$TAG"             --repo "$GITHUB_REPOSITORY"             --pattern "$ASSET_NAME"             --dir /tmp/redownload
+
+          published="/tmp/redownload/$ASSET_NAME"
+          published_sha="$(sha256sum "$published" | awk '{print $1}')"
+          published_bytes="$(stat -c '%s' "$published")"
+
+          [[ "$published_sha" == "$EXPECTED_SHA256" ]] || {
+            echo "Published release SHA-256 does not match certified installer." >&2
+            exit 1
+          }
+          [[ "$published_bytes" == "$EXPECTED_BYTES" ]] || {
+            echo "Published release byte count does not match certified installer." >&2
+            exit 1
+          }
+
+          gh api             "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"             > /tmp/published-release.json
+
+          jq -e             --arg tag "$TAG"             --arg asset "$ASSET_NAME"             '.tag_name == $tag
+             and .draft == false
+             and .prerelease == true
+             and (.assets | length) == 1
+             and .assets[0].name == $asset'             /tmp/published-release.json >/dev/null || {
+              echo "Published release metadata drifted from PREPRODUCTION policy." >&2
+              exit 1
+            }
+
+          latest_status="$(curl -sS -o /tmp/latest-release.json -w '%{http_code}'             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer $GH_TOKEN"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest")"
+          if [[ "$latest_status" == "200" ]] &&              [[ "$(jq -r '.tag_name' /tmp/latest-release.json)" == "$TAG" ]]; then
+            echo "PREPRODUCTION release became latest unexpectedly." >&2
+            exit 1
+          fi
+          [[ "$latest_status" == "200" || "$latest_status" == "404" ]] || {
+            echo "Could not verify latest-release policy (HTTP $latest_status)." >&2
+            exit 1
+          }
+
+          verified=1
+          trap - EXIT
+
+          {
+            echo "### Agent PREPRODUCTION publication"
+            echo
+            echo "- Tag: `$TAG`"
+            echo "- Source SHA: `$AGENT_SOURCE_SHA`"
+            echo "- Certification run: `$AGENT_CERTIFICATION_RUN_ID`"
+            echo "- Artifact ID: `$INSTALLER_ARTIFACT_ID`"
+            echo "- SHA-256: `$EXPECTED_SHA256`"
+            echo "- Bytes: `$EXPECTED_BYTES`"
+            echo "- GitHub prerelease: `true`"
+            echo "- production_ready: `false`"
+          } >> "$GITHUB_STEP_SUMMARY"

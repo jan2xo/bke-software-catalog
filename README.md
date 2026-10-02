@@ -16,7 +16,7 @@ Use one release tag per product version:
 
 Example:
 
-- `bke-licensing-agent-v1.0.0`
+- `bke-licensing-agent-v2.0.0`
 
 ## Asset naming
 
@@ -24,15 +24,29 @@ Keep platform and architecture explicit and stable.
 
 Examples:
 
-- `BKE-Licensing-Agent-1.0.0-Windows-x64.exe`
+- `BKE-Licensing-Agent-2.0.0-Windows-x64.exe`
 - `BKE-Air-Stack-1.0.0-Windows-x64.zip`
 - `BKE-Render-Dock-1.0.0-Windows-x64.zip`
 
 ## Authority boundary
 
-- **Digital Solutions** decides what version is current and which catalog asset URL is offered.
-- **BKE Software Catalog** stores release assets.
-- **Licensing Agent** checks Digital Solutions, not GitHub HTML, then downloads the exact catalog URL returned by the API.
-- Product repositories remain canonical for source code.
+- **Digital Solutions** decides what version is current and which exact catalog release/artifact is authorized.
+- **BKE Software Catalog** stores immutable release bytes and must not rebuild product source.
+- **Licensing Agent** verifies Digital Solutions policy and the exact GitHub artifact identity before privileged update/install work.
+- Product repositories remain canonical for source and build/certification provenance.
 
-Do not place application source code or licensing authority logic in this repository.
+## Agent PREPRODUCTION publication
+
+Agent publication is explicit and consumes bytes already certified by the
+Licensing Agent repository. The Software Catalog independently verifies the
+exact Agent source SHA, successful installer certification run, Actions artifact
+ID, package manifest, installer SHA-256, and byte count before publication.
+
+PREPRODUCTION Agent releases are prereleases, are not production-ready, must not
+become the repository's latest release, and must never overwrite an existing
+release or tag.
+
+Merging publication tooling does not itself authorize or perform a release.
+
+Do not place application source code, build logic, private signing material, or
+licensing authority logic in this repository.
