@@ -1,0 +1,318 @@
+name: Publish Media Organizer PREPRODUCTION release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact certified Media Organizer source commit
+        required: true
+        type: string
+      certification_run_id:
+        description: Exact successful Desktop MVP certification run
+        required: true
+        type: string
+      certification_run_attempt:
+        description: Exact certification attempt (normally 1)
+        required: true
+        type: string
+      macos_artifact_id:
+        description: Exact macOS ARM64 Actions artifact ID
+        required: true
+        type: string
+      expected_archive_sha256:
+        description: Exact GitHub Actions ZIP archive SHA-256 (64 lowercase hex)
+        required: true
+        type: string
+      beta_version:
+        description: Beta release version (for example 1.0.0-beta.1)
+        required: true
+        type: string
+      authorization:
+        description: Type PUBLISH_MEDIA_ORGANIZER_PREPRODUCTION to approve publication
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: media-organizer-preproduction-${{ inputs.beta_version }}
+  cancel-in-progress: false
+
+env:
+  PRODUCT_REPOSITORY: jan2xo/bke-metadata-manager
+  EXPECTED_WORKFLOW: .github/workflows/desktop.yml
+  EXPECTED_ARTIFACT: BKE-Media-Organizer-macOS-ARM64
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  RUN_ID: ${{ inputs.certification_run_id }}
+  RUN_ATTEMPT: ${{ inputs.certification_run_attempt }}
+  ARTIFACT_ID: ${{ inputs.macos_artifact_id }}
+  ARCHIVE_SHA256: ${{ inputs.expected_archive_sha256 }}
+  BETA_VERSION: ${{ inputs.beta_version }}
+
+jobs:
+  publish:
+    name: Verify exact developer artifact and publish untrusted-signature beta
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Require owner-only explicit PREPRODUCTION authority
+        env:
+          AUTHORIZATION: ${{ inputs.authorization }}
+          ARTIFACT_READ_TOKEN: ${{ secrets.MEDIA_ORGANIZER_ARTIFACT_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Only catalog main can publish." >&2; exit 1; }
+          [[ "$GITHUB_ACTOR" == "jan2xo" ]] || { echo "Only the repository owner may publish." >&2; exit 1; }
+          [[ "$AUTHORIZATION" == "PUBLISH_MEDIA_ORGANIZER_PREPRODUCTION" ]] || {
+            echo "Missing explicit PREPRODUCTION publication approval." >&2; exit 1;
+          }
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$BETA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] || {
+            echo "Only explicit beta prerelease versions are allowed." >&2; exit 1;
+          }
+          [[ -n "$ARTIFACT_READ_TOKEN" ]] || {
+            echo "Missing repository Actions:read token; fail closed." >&2; exit 1;
+          }
+
+      - name: Verify exact product CI, run attempt, five required jobs and artifact digest
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.MEDIA_ORGANIZER_ARTIFACT_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$PRODUCT_REPOSITORY"
+          headers=(-H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" -H "Authorization: Bearer $READ_TOKEN")
+          curl -fsSL --retry 3 "${headers[@]}" "$api/actions/runs/$RUN_ID" -o /tmp/product-run.json
+          jq -e --arg repo "$PRODUCT_REPOSITORY" --arg workflow "$EXPECTED_WORKFLOW" \
+            --arg sha "$SOURCE_SHA" --argjson attempt "$RUN_ATTEMPT" \
+            '.repository.full_name == $repo
+             and .path == $workflow
+             and .head_sha == $sha
+             and .run_attempt == $attempt
+             and .event == "push"
+             and .status == "completed"
+             and .conclusion == "success"' /tmp/product-run.json >/dev/null || {
+            echo "Expected exact source/run/attempt not certified." >&2; exit 1;
+          }
+          curl -fsSL --retry 3 "${headers[@]}" "$api/actions/runs/$RUN_ID/jobs?per_page=100&filter=latest" -o /tmp/product-jobs.json
+          jq -e --argjson attempt "$RUN_ATTEMPT" '
+            def ok($name): any(.jobs[]; .name == $name and .status == "completed" and .conclusion == "success" and .run_attempt == $attempt);
+            (.total_count == 5)
+            and ok("Build and test (macos-latest)")
+            and ok("Build and test (windows-latest)")
+            and ok("Build and test (ubuntu-latest)")
+            and ok("Self-contained desktop build (osx-arm64)")
+            and ok("Self-contained desktop build (win-x64)")' /tmp/product-jobs.json >/dev/null || {
+            echo "Five exact-head desktop CI jobs not all PASS." >&2; exit 1;
+          }
+          curl -fsSL --retry 3 "${headers[@]}" "$api/actions/artifacts/$ARTIFACT_ID" -o /tmp/product-artifact.json
+          jq -e --arg name "$EXPECTED_ARTIFACT" --arg sha "$SOURCE_SHA" \
+            --arg digest "sha256:$ARCHIVE_SHA256" --argjson run "$RUN_ID" \
+            '.name == $name
+             and .expired == false
+             and .workflow_run.id == $run
+             and .workflow_run.head_sha == $sha
+             and .digest == $digest' /tmp/product-artifact.json >/dev/null || {
+            echo "Artifact identity or immutable archive digest mismatched." >&2; exit 1;
+          }
+
+      - name: Download immutable ZIP and verify full archive hash
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.MEDIA_ORGANIZER_ARTIFACT_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --max-time 600 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$PRODUCT_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            -o /tmp/certified-artifact.zip
+          echo "$ARCHIVE_SHA256  /tmp/certified-artifact.zip" | sha256sum --check --status || {
+            echo "Downloaded archive SHA-256 is not the certified GitHub digest." >&2; exit 1;
+          }
+
+      - name: Validate exact two prebuilt package bytes and emit evidence
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, shutil, stat, zipfile
+          archive = pathlib.Path('/tmp/certified-artifact.zip')
+          out = pathlib.Path('distribution')
+          out.mkdir(exist_ok=True)
+          required = {'BKE-Media-Organizer-macOS-ARM64.dmg', 'BKE-Media-Organizer-macOS-ARM64.zip'}
+          with zipfile.ZipFile(archive) as z:
+              members = z.infolist()
+              if {i.filename for i in members} != required or len(members) != 2:
+                  raise SystemExit('FAIL: archive contains unexpected paths or file count')
+              if any(i.is_dir() or i.file_size < 100_000 or i.file_size > 500_000_000
+                     or stat.S_ISLNK(i.external_attr >> 16) for i in members):
+                  raise SystemExit('FAIL: invalid archive payload')
+              for member in members:
+                  path = out / member.filename
+                  with z.open(member) as src, path.open('xb') as dest:
+                      shutil.copyfileobj(src, dest, length=1024*1024)
+                  if path.stat().st_size != member.file_size:
+                      raise SystemExit('FAIL: extracted package size changed')
+          appzip = out / 'BKE-Media-Organizer-macOS-ARM64.zip'
+          with zipfile.ZipFile(appzip) as app:
+              names = set(app.namelist())
+              required_entries = {
+                  'BKE Media Organizer.app/Contents/Info.plist',
+                  'BKE Media Organizer.app/Contents/MacOS/BKE Media Organizer',
+                  'BKE Media Organizer.app/Contents/Resources/Backend/Bke.MetadataManager'
+              }
+              if not required_entries.issubset(names):
+                  raise SystemExit('FAIL: Apple Silicon application bundle layout is incomplete')
+          def digest(path):
+              h = hashlib.sha256()
+              with path.open('rb') as stream:
+                  for chunk in iter(lambda: stream.read(1024*1024), b''):
+                      h.update(chunk)
+              return {'file': path.name, 'sha256': h.hexdigest(), 'bytes': path.stat().st_size}
+          payload = {
+              'schema': 'bke.media-organizer-preproduction.v1',
+              'status': 'PREPRODUCTION',
+              'production_ready': False,
+              'source_repository': os.environ['PRODUCT_REPOSITORY'],
+              'source_sha': os.environ['SOURCE_SHA'],
+              'certification_run_id': int(os.environ['RUN_ID']),
+              'certification_run_attempt': int(os.environ['RUN_ATTEMPT']),
+              'artifact_id': int(os.environ['ARTIFACT_ID']),
+              'artifact_name': os.environ['EXPECTED_ARTIFACT'],
+              'artifact_archive_sha256': os.environ['ARCHIVE_SHA256'],
+              'version': os.environ['BETA_VERSION'],
+              'platform': 'macos',
+              'architecture': 'arm64',
+              'signature_trust': 'AD_HOC_ONLY',
+              'apple_developer_id_signed': False,
+              'notarized': False,
+              'packages': [digest(out / name) for name in sorted(required)]
+          }
+          (out / 'BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json').write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          print('Verified exact archive members; recorded individual distributable SHA-256 and sizes')
+          PY
+          echo "tag=bke-media-organizer-v$BETA_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse any pre-existing release or Git tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl -sS -o /tmp/release-present.json -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          [[ "$status" == "404" ]] || { echo "Release exists or existence is unverifiable ($status)." >&2; exit 1; }
+          status="$(curl -sS -o /tmp/tag-present.json -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")"
+          [[ "$status" == "404" ]] || { echo "Tag exists or existence is unverifiable ($status)." >&2; exit 1; }
+
+      - name: Publish immutable macOS beta packages, re-download and verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+        run: |
+          set -euo pipefail
+          created=0
+          verified=0
+          cleanup() {
+            if [[ "$created" == 1 && "$verified" != 1 ]]; then
+              echo "Release verification failed; deleting this attempt's unverified publication." >&2
+              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            fi
+          }
+          trap cleanup EXIT
+          cat > /tmp/release-notes.md <<EOF
+          BKE Media Organizer $BETA_VERSION — PREPRODUCTION BETA
+
+          status=PREPRODUCTION
+          production_ready=false
+          signature_trust=AD_HOC_ONLY
+          apple_developer_id_signed=false
+          notarized=false
+          source_repository=$PRODUCT_REPOSITORY
+          source_sha=$SOURCE_SHA
+          certification_run_id=$RUN_ID
+          certification_run_attempt=$RUN_ATTEMPT
+          artifact_id=$ARTIFACT_ID
+          artifact_archive_sha256=$ARCHIVE_SHA256
+
+          This beta contains unmodified DMG and app-ZIP bytes from a passing, exact-source GitHub Actions developer build.
+          The app was ad-hoc signed during original macOS packaging, not Developer ID signed.
+          It is NOT Apple-notarized; macOS Gatekeeper may require user approval. No Apple trust endorsement is implied.
+          Hardware-specific visual, Finder drag/drop, responsive layout and real-media move acceptance is NOT certified.
+          Use for controlled beta testing only. This release is NOT authorized for production catalog activation.
+          See BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json for final per-file SHA-256 and size.
+          EOF
+          jq -n --arg tag "$TAG" --arg name "BKE Media Organizer $BETA_VERSION PREPRODUCTION" \
+            --arg target "$GITHUB_SHA" --rawfile body /tmp/release-notes.md \
+            '{tag_name: $tag, target_commitish: $target, name: $name,
+              body: $body, draft: false, prerelease: true, generate_release_notes: false, make_latest: "false"}' \
+            > /tmp/release.json
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" --input /tmp/release.json > /tmp/created-release.json
+          created=1
+          gh release upload "$TAG" \
+            distribution/BKE-Media-Organizer-macOS-ARM64.dmg \
+            distribution/BKE-Media-Organizer-macOS-ARM64.zip \
+            distribution/BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json \
+            --repo "$GITHUB_REPOSITORY"
+          mkdir -p /tmp/released
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir /tmp/released
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          local = pathlib.Path('distribution')
+          remote = pathlib.Path('/tmp/released')
+          manifest = json.loads((remote / 'BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json').read_text())
+          if (remote / 'BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json').read_bytes() != \
+             (local / 'BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json').read_bytes():
+              raise SystemExit('FAIL: published evidence manifest drifted')
+          expected = {'BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json'}
+          for item in manifest['packages']:
+              expected.add(item['file'])
+              path = remote / item['file']
+              if path.stat().st_size != item['bytes']:
+                  raise SystemExit('FAIL: published package size drifted')
+              if hashlib.sha256(path.read_bytes()).hexdigest() != item['sha256']:
+                  raise SystemExit('FAIL: published package SHA-256 drifted')
+          if {p.name for p in remote.iterdir()} != expected:
+              raise SystemExit('FAIL: published asset set drifted')
+          print('PASS: all published bytes identical to certified artifact files')
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /tmp/published.json
+          jq -e --arg tag "$TAG" '
+             .tag_name == $tag and .prerelease == true and .draft == false
+             and (.assets | length) == 3
+             and ([.assets[].name] | sort) ==
+               (["BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json",
+                 "BKE-Media-Organizer-macOS-ARM64.dmg",
+                 "BKE-Media-Organizer-macOS-ARM64.zip"] | sort)' /tmp/published.json >/dev/null
+          status="$(curl -sS -o /tmp/latest.json -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest")"
+          if [[ "$status" == "200" ]]; then
+            [[ "$(jq -r .tag_name /tmp/latest.json)" != "$TAG" ]] || {
+              echo "Beta unexpectedly became latest release." >&2; exit 1;
+            }
+          else
+            [[ "$status" == "404" ]] || { echo "Unable to verify latest release policy." >&2; exit 1; }
+          fi
+          verified=1
+          trap - EXIT
+          echo "### Media Organizer PREPRODUCTION publication: PASS" >> "$GITHUB_STEP_SUMMARY"
+          echo "Source: @$SOURCE_SHA, run $RUN_ID attempt $RUN_ATTEMPT, artifact $ARTIFACT_ID" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag: $TAG — prerelease, NOT production-ready, AD_HOC_ONLY" >> "$GITHUB_STEP_SUMMARY"
