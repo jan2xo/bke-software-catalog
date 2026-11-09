@@ -164,14 +164,12 @@ jobs:
                   raise SystemExit("Forbidden trigger, build or overwrite: " + forbidden)
           if "ARTIFACT_READ_TOKEN: " not in text:
               raise SystemExit("Artifact credential must be scoped to step environment.")
-          if text.count('"https://api.github.com/repos/$PRODUCT_REPOSITORY/actions/artifacts/
-          print("Media Organizer PREPRODUCTION publication guard: PASS")
-) < 2:
-              raise SystemExit("Publisher must independently download both immutable platform artifacts.")
+          if text.count("actions/artifacts/") < 4:
+              raise SystemExit("Both platform artifacts must be checked and downloaded.")
           if text.count("sha256sum --check --status") < 2:
-              raise SystemExit("Publisher must hash-check each Actions artifact archive.")
+              raise SystemExit("Both platform archives need SHA-256 proof.")
           if text.count("gh release upload") != 1 or text.count("gh release download") != 1:
-              raise SystemExit("Only one explicitly approved release transaction is allowed.")
+              raise SystemExit("Exactly one release publish and verification transaction is permitted.")
           if "WINDOWS_ARCHIVE_SHA256" not in text or "macOS app" not in text:
-              raise SystemExit("Both platform trust claims must be explicit.")
+              raise SystemExit("Each platform must declare its signing trust clearly.")
           print("Media Organizer PREPRODUCTION publication guard: PASS")
