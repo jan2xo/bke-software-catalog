@@ -260,7 +260,8 @@ jobs:
               'version': os.environ['BETA_VERSION'],
               'platform': 'multi-platform',
               'architecture': 'per-platform',
-              'signature_trust': 'AD_HOC_ONLY',
+              'signature_trust': 'UNTRUSTED_PLATFORM_SPECIFIC',
+              'macos_signature_trust': 'AD_HOC_ONLY',
               'windows_signature_trust': 'UNSIGNED',
               'apple_developer_id_signed': False,
               'notarized': False,
@@ -326,7 +327,8 @@ jobs:
 
           status=PREPRODUCTION
           production_ready=false
-          signature_trust=AD_HOC_ONLY
+          signature_trust=UNTRUSTED_PLATFORM_SPECIFIC
+          macos_signature_trust=AD_HOC_ONLY
           apple_developer_id_signed=false
           notarized=false
           source_repository=$PRODUCT_REPOSITORY
