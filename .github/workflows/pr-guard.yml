@@ -122,7 +122,8 @@ jobs:
           required = [
               "workflow_dispatch:", "source_sha:", "certification_run_id:",
               "certification_run_attempt:", "macos_artifact_id:",
-              "expected_archive_sha256:", "beta_version:", "authorization:",
+              "expected_archive_sha256:", "windows_artifact_id:",
+              "expected_windows_archive_sha256:", "beta_version:", "authorization:",
               '[[ "$GITHUB_REF" == "refs/heads/main" ]]',
               '[[ "$GITHUB_ACTOR" == "jan2xo" ]]',
               "PUBLISH_MEDIA_ORGANIZER_PREPRODUCTION",
@@ -134,7 +135,15 @@ jobs:
               "Build and test (ubuntu-latest)",
               "Self-contained desktop build (osx-arm64)",
               "Self-contained desktop build (win-x64)",
-              "ARCHIVE_SHA256", "sha256sum --check",
+              "ARCHIVE_SHA256", "WINDOWS_ARCHIVE_SHA256",
+              "WINDOWS_ARTIFACT_ID", "EXPECTED_WINDOWS_ARTIFACT",
+              "media-organizer-win-x64", "sha256sum --check",
+              "Bke.MetadataManager.exe", "Avalonia.Win32.dll",
+              "Windows artifact identity, same-run provenance",
+              "bke.media-organizer-preproduction.v2",
+              "BKE-Media-Organizer-Windows-x64.zip",
+              "windows_signature_trust", "'UNSIGNED'",
+              "and (.assets | length) == 4",
               "PREPRODUCTION", "production_ready",
               "AD_HOC_ONLY", "notarized", "apple_developer_id_signed",
               "prerelease: true", 'make_latest: "false"',
@@ -154,5 +163,15 @@ jobs:
               if forbidden.lower() in text.lower():
                   raise SystemExit("Forbidden trigger, build or overwrite: " + forbidden)
           if "ARTIFACT_READ_TOKEN: " not in text:
-              raise SystemExit("Signing-related credential must be scoped to step environment.")
+              raise SystemExit("Artifact credential must be scoped to step environment.")
+          if text.count('"https://api.github.com/repos/$PRODUCT_REPOSITORY/actions/artifacts/
+          print("Media Organizer PREPRODUCTION publication guard: PASS")
+) < 2:
+              raise SystemExit("Publisher must independently download both immutable platform artifacts.")
+          if text.count("sha256sum --check --status") < 2:
+              raise SystemExit("Publisher must hash-check each Actions artifact archive.")
+          if text.count("gh release upload") != 1 or text.count("gh release download") != 1:
+              raise SystemExit("Only one explicitly approved release transaction is allowed.")
+          if "WINDOWS_ARCHIVE_SHA256" not in text or "macOS app" not in text:
+              raise SystemExit("Both platform trust claims must be explicit.")
           print("Media Organizer PREPRODUCTION publication guard: PASS")
