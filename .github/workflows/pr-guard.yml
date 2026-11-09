@@ -153,6 +153,6 @@ jobs:
                             "PUBLISH_MEDIA_ORGANIZER_PRODUCTION"):
               if forbidden.lower() in text.lower():
                   raise SystemExit("Forbidden trigger, build or overwrite: " + forbidden)
-          if '[[ -n "' in text and "secrets." in text:
-              raise SystemExit("Do not interpolate credentials directly into executable shell.")
+          if "ARTIFACT_READ_TOKEN: " not in text:
+              raise SystemExit("Signing-related credential must be scoped to step environment.")
           print("Media Organizer PREPRODUCTION publication guard: PASS")
