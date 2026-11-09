@@ -105,3 +105,54 @@ jobs:
               )
 
           print("Software Catalog Agent PREPRODUCTION publication policy: PASS")
+
+  media-organizer-release-policy:
+    name: Media Organizer PREPRODUCTION publication contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact-artifact beta publication stays manual and preproduction
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path(".github/workflows/publish-media-organizer-preproduction.yml")
+          if not path.exists():
+              raise SystemExit("Media Organizer publisher workflow missing.")
+          text = path.read_text(encoding="utf-8")
+          required = [
+              "workflow_dispatch:", "source_sha:", "certification_run_id:",
+              "certification_run_attempt:", "macos_artifact_id:",
+              "expected_archive_sha256:", "beta_version:", "authorization:",
+              '[[ "$GITHUB_REF" == "refs/heads/main" ]]',
+              '[[ "$GITHUB_ACTOR" == "jan2xo" ]]',
+              "PUBLISH_MEDIA_ORGANIZER_PREPRODUCTION",
+              "MEDIA_ORGANIZER_ARTIFACT_READ_TOKEN",
+              "jan2xo/bke-metadata-manager",
+              ".github/workflows/desktop.yml",
+              "Build and test (macos-latest)",
+              "Build and test (windows-latest)",
+              "Build and test (ubuntu-latest)",
+              "Self-contained desktop build (osx-arm64)",
+              "Self-contained desktop build (win-x64)",
+              "ARCHIVE_SHA256", "sha256sum --check",
+              "PREPRODUCTION", "production_ready",
+              "AD_HOC_ONLY", "notarized", "apple_developer_id_signed",
+              "prerelease: true", 'make_latest: "false"',
+              "gh release upload", "gh release download",
+              "Refuse any pre-existing release or Git tag",
+              "published package SHA-256 drifted",
+          ]
+          missing = [token for token in required if token not in text]
+          if missing:
+              raise SystemExit("Beta publisher missing policy tokens: " + ", ".join(missing))
+          if text.count("workflow_dispatch:") != 1:
+              raise SystemExit("Beta publication requires exactly one dispatch trigger.")
+          for forbidden in ("\n  push:", "\n  pull_request:", "\n  schedule:", "\n  workflow_run:",
+                            "actions/setup-dotnet", "dotnet publish", "dotnet build",
+                            "--clobber", "release upload --clobber",
+                            "PUBLISH_MEDIA_ORGANIZER_PRODUCTION"):
+              if forbidden.lower() in text.lower():
+                  raise SystemExit("Forbidden trigger, build or overwrite: " + forbidden)
+          if '[[ -n "${{ secrets.' in text:
+              raise SystemExit("Do not interpolate credentials directly into executable shell.")
+          print("Media Organizer PREPRODUCTION publication guard: PASS")
