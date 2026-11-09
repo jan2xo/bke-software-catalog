@@ -226,7 +226,7 @@ jobs:
                   raise SystemExit('FAIL: duplicate case-insensitive Windows filenames')
               if any(
                   item.is_dir() or not item.filename or '/' in item.filename
-                  or '\\\\' in item.filename or item.file_size <= 0
+                  or chr(92) in item.filename or item.file_size <= 0
                   or item.file_size > 250_000_000
                   or stat.S_ISLNK(item.external_attr >> 16)
                   for item in entries
@@ -258,12 +258,28 @@ jobs:
               'windows_artifact_name': os.environ['EXPECTED_WINDOWS_ARTIFACT'],
               'windows_artifact_archive_sha256': os.environ['WINDOWS_ARCHIVE_SHA256'],
               'version': os.environ['BETA_VERSION'],
-              'platform': 'macos',
-              'architecture': 'arm64',
+              'platform': 'multi-platform',
+              'architecture': 'per-platform',
               'signature_trust': 'AD_HOC_ONLY',
               'windows_signature_trust': 'UNSIGNED',
               'apple_developer_id_signed': False,
               'notarized': False,
+              'platforms': [
+                  {
+                      'platform': 'macos', 'architecture': 'arm64',
+                      'signature_trust': 'AD_HOC_ONLY',
+                      'artifact_id': int(os.environ['ARTIFACT_ID']),
+                      'artifact_archive_sha256': os.environ['ARCHIVE_SHA256'],
+                      'asset_files': sorted(required),
+                  },
+                  {
+                      'platform': 'windows', 'architecture': 'x64',
+                      'signature_trust': 'UNSIGNED',
+                      'artifact_id': int(os.environ['WINDOWS_ARTIFACT_ID']),
+                      'artifact_archive_sha256': os.environ['WINDOWS_ARCHIVE_SHA256'],
+                      'asset_files': [windowszip.name],
+                  }
+              ],
               'packages': [digest(out / name) for name in sorted(required)] + [digest(windowszip)]
           }
           (out / 'BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json').write_text(
