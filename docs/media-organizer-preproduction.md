@@ -1,3 +1,5 @@
+> **Updated release path (2026-11-09):** This document preserves the original macOS-only pilot proof. The current catalog publisher also requires and distributes the exact Windows x64 artifact from the same CI run. See [dual-platform artifact and parity checkpoint](media-organizer-dual-platform-beta.md) for the updated contract. Do not dispatch with only the macOS artifact inputs.
+
 # BKE Media Organizer — PREPRODUCTION prerelease pilot
 
 ## Intent and authority
