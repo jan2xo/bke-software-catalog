@@ -23,6 +23,14 @@ on:
         description: Exact GitHub Actions ZIP archive SHA-256 (64 lowercase hex)
         required: true
         type: string
+      windows_artifact_id:
+        description: Exact Windows x64 Actions artifact ID from the SAME certified run
+        required: true
+        type: string
+      expected_windows_archive_sha256:
+        description: Exact Windows x64 ZIP archive SHA-256 (64 lowercase hex)
+        required: true
+        type: string
       beta_version:
         description: Beta release version (for example 1.0.0-beta.1)
         required: true
@@ -43,11 +51,14 @@ env:
   PRODUCT_REPOSITORY: jan2xo/bke-metadata-manager
   EXPECTED_WORKFLOW: .github/workflows/desktop.yml
   EXPECTED_ARTIFACT: BKE-Media-Organizer-macOS-ARM64
+  EXPECTED_WINDOWS_ARTIFACT: media-organizer-win-x64
   SOURCE_SHA: ${{ inputs.source_sha }}
   RUN_ID: ${{ inputs.certification_run_id }}
   RUN_ATTEMPT: ${{ inputs.certification_run_attempt }}
   ARTIFACT_ID: ${{ inputs.macos_artifact_id }}
   ARCHIVE_SHA256: ${{ inputs.expected_archive_sha256 }}
+  WINDOWS_ARTIFACT_ID: ${{ inputs.windows_artifact_id }}
+  WINDOWS_ARCHIVE_SHA256: ${{ inputs.expected_windows_archive_sha256 }}
   BETA_VERSION: ${{ inputs.beta_version }}
 
 jobs:
@@ -74,6 +85,9 @@ jobs:
           [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$WINDOWS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$WINDOWS_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$ARTIFACT_ID" != "$WINDOWS_ARTIFACT_ID" ]] || { echo "Platform artifacts must be distinct." >&2; exit 1; }
           [[ "$BETA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]] || {
             echo "Only explicit beta prerelease versions are allowed." >&2; exit 1;
           }
@@ -123,7 +137,18 @@ jobs:
             echo "Artifact identity or immutable archive digest mismatched." >&2; exit 1;
           }
 
-      - name: Download immutable ZIP and verify full archive hash
+          curl -fsSL --retry 3 "${headers[@]}" "$api/actions/artifacts/$WINDOWS_ARTIFACT_ID" -o /tmp/windows-artifact.json
+          jq -e --arg name "$EXPECTED_WINDOWS_ARTIFACT" --arg sha "$SOURCE_SHA" \
+            --arg digest "sha256:$WINDOWS_ARCHIVE_SHA256" --argjson run "$RUN_ID" \
+            '.name == $name
+             and .expired == false
+             and .workflow_run.id == $run
+             and .workflow_run.head_sha == $sha
+             and .digest == $digest' /tmp/windows-artifact.json >/dev/null || {
+            echo "Windows artifact identity, same-run provenance, or digest mismatched." >&2; exit 1;
+          }
+
+      - name: Download both immutable ZIP archives and verify hashes
         shell: bash
         env:
           READ_TOKEN: ${{ secrets.MEDIA_ORGANIZER_ARTIFACT_READ_TOKEN }}
@@ -136,10 +161,19 @@ jobs:
             "https://api.github.com/repos/$PRODUCT_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
             -o /tmp/certified-artifact.zip
           echo "$ARCHIVE_SHA256  /tmp/certified-artifact.zip" | sha256sum --check --status || {
-            echo "Downloaded archive SHA-256 is not the certified GitHub digest." >&2; exit 1;
+            echo "Downloaded macOS archive SHA-256 does not match certified digest." >&2; exit 1;
+          }
+          curl -fsSL --retry 3 --max-time 600 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$PRODUCT_REPOSITORY/actions/artifacts/$WINDOWS_ARTIFACT_ID/zip" \
+            -o /tmp/certified-windows.zip
+          echo "$WINDOWS_ARCHIVE_SHA256  /tmp/certified-windows.zip" | sha256sum --check --status || {
+            echo "Downloaded Windows archive SHA-256 does not match certified digest." >&2; exit 1;
           }
 
-      - name: Validate exact two prebuilt package bytes and emit evidence
+      - name: Validate exact macOS and Windows packages and emit SHA-256 evidence
         id: package
         shell: bash
         run: |
@@ -173,6 +207,36 @@ jobs:
               }
               if not required_entries.issubset(names):
                   raise SystemExit('FAIL: Apple Silicon application bundle layout is incomplete')
+          # The Windows GitHub Actions archive is already the portable package.
+          # Rename it for users without re-zipping, re-signing, or rebuilding any bytes.
+          windowszip = out / 'BKE-Media-Organizer-Windows-x64.zip'
+          shutil.copyfile('/tmp/certified-windows.zip', windowszip)
+          with zipfile.ZipFile(windowszip) as win:
+              entries = win.infolist()
+              names = [item.filename for item in entries]
+              required_windows = {
+                  'Bke.MetadataManager.exe',
+                  'Bke.MetadataManager.dll',
+                  'Bke.MetadataManager.runtimeconfig.json',
+                  'coreclr.dll', 'hostfxr.dll', 'Avalonia.Win32.dll'
+              }
+              if len(entries) < len(required_windows) or not required_windows.issubset(set(names)):
+                  raise SystemExit('FAIL: Windows self-contained executable/runtime layout incomplete')
+              if len({name.casefold() for name in names}) != len(names):
+                  raise SystemExit('FAIL: duplicate case-insensitive Windows filenames')
+              if any(
+                  item.is_dir() or not item.filename or '/' in item.filename
+                  or chr(92) in item.filename or item.file_size <= 0
+                  or item.file_size > 250_000_000
+                  or stat.S_ISLNK(item.external_attr >> 16)
+                  for item in entries
+              ):
+                  raise SystemExit('FAIL: Windows artifact has unsafe, unexpected or nested entries')
+              if sum(item.file_size for item in entries) > 1_000_000_000:
+                  raise SystemExit('FAIL: Windows artifact exceeds expected extraction budget')
+              with win.open('Bke.MetadataManager.exe') as exe:
+                  if exe.read(2) != b'MZ':
+                      raise SystemExit('FAIL: Windows executable lacks PE signature')
           def digest(path):
               h = hashlib.sha256()
               with path.open('rb') as stream:
@@ -180,7 +244,7 @@ jobs:
                       h.update(chunk)
               return {'file': path.name, 'sha256': h.hexdigest(), 'bytes': path.stat().st_size}
           payload = {
-              'schema': 'bke.media-organizer-preproduction.v1',
+              'schema': 'bke.media-organizer-preproduction.v2',
               'status': 'PREPRODUCTION',
               'production_ready': False,
               'source_repository': os.environ['PRODUCT_REPOSITORY'],
@@ -190,18 +254,39 @@ jobs:
               'artifact_id': int(os.environ['ARTIFACT_ID']),
               'artifact_name': os.environ['EXPECTED_ARTIFACT'],
               'artifact_archive_sha256': os.environ['ARCHIVE_SHA256'],
+              'windows_artifact_id': int(os.environ['WINDOWS_ARTIFACT_ID']),
+              'windows_artifact_name': os.environ['EXPECTED_WINDOWS_ARTIFACT'],
+              'windows_artifact_archive_sha256': os.environ['WINDOWS_ARCHIVE_SHA256'],
               'version': os.environ['BETA_VERSION'],
-              'platform': 'macos',
-              'architecture': 'arm64',
-              'signature_trust': 'AD_HOC_ONLY',
+              'platform': 'multi-platform',
+              'architecture': 'per-platform',
+              'signature_trust': 'UNTRUSTED_PLATFORM_SPECIFIC',
+              'macos_signature_trust': 'AD_HOC_ONLY',
+              'windows_signature_trust': 'UNSIGNED',
               'apple_developer_id_signed': False,
               'notarized': False,
-              'packages': [digest(out / name) for name in sorted(required)]
+              'platforms': [
+                  {
+                      'platform': 'macos', 'architecture': 'arm64',
+                      'signature_trust': 'AD_HOC_ONLY',
+                      'artifact_id': int(os.environ['ARTIFACT_ID']),
+                      'artifact_archive_sha256': os.environ['ARCHIVE_SHA256'],
+                      'asset_files': sorted(required),
+                  },
+                  {
+                      'platform': 'windows', 'architecture': 'x64',
+                      'signature_trust': 'UNSIGNED',
+                      'artifact_id': int(os.environ['WINDOWS_ARTIFACT_ID']),
+                      'artifact_archive_sha256': os.environ['WINDOWS_ARCHIVE_SHA256'],
+                      'asset_files': [windowszip.name],
+                  }
+              ],
+              'packages': [digest(out / name) for name in sorted(required)] + [digest(windowszip)]
           }
           (out / 'BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json').write_text(
               json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8'
           )
-          print('Verified exact archive members; recorded individual distributable SHA-256 and sizes')
+          print('Verified both platform artifact layouts; recorded exact distributable SHA-256 and sizes')
           PY
           echo "tag=bke-media-organizer-v$BETA_VERSION" >> "$GITHUB_OUTPUT"
 
@@ -221,7 +306,7 @@ jobs:
             "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")"
           [[ "$status" == "404" ]] || { echo "Tag exists or existence is unverifiable ($status)." >&2; exit 1; }
 
-      - name: Publish immutable macOS beta packages, re-download and verify
+      - name: Publish immutable Windows and macOS beta packages, re-download and verify
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -242,7 +327,8 @@ jobs:
 
           status=PREPRODUCTION
           production_ready=false
-          signature_trust=AD_HOC_ONLY
+          signature_trust=UNTRUSTED_PLATFORM_SPECIFIC
+          macos_signature_trust=AD_HOC_ONLY
           apple_developer_id_signed=false
           notarized=false
           source_repository=$PRODUCT_REPOSITORY
@@ -251,11 +337,16 @@ jobs:
           certification_run_attempt=$RUN_ATTEMPT
           artifact_id=$ARTIFACT_ID
           artifact_archive_sha256=$ARCHIVE_SHA256
+          windows_artifact_id=$WINDOWS_ARTIFACT_ID
+          windows_artifact_archive_sha256=$WINDOWS_ARCHIVE_SHA256
+          windows_signature_trust=UNSIGNED
 
-          This beta contains unmodified DMG and app-ZIP bytes from a passing, exact-source GitHub Actions developer build.
-          The app was ad-hoc signed during original macOS packaging, not Developer ID signed.
-          It is NOT Apple-notarized; macOS Gatekeeper may require user approval. No Apple trust endorsement is implied.
-          Hardware-specific visual, Finder drag/drop, responsive layout and real-media move acceptance is NOT certified.
+          This beta contains exact unmodified Windows x64 and macOS ARM64 GitHub Actions developer artifacts from ONE passing source SHA and CI run.
+          The macOS app is ad-hoc signed, NOT Developer ID signed or notarized; Gatekeeper may require user approval.
+          The Windows portable ZIP is NOT Authenticode signed; Windows may warn about an unknown publisher.
+          The Windows frontend is Avalonia, the macOS frontend native SwiftUI; both share the same .NET media mover.
+          Windows category deletion and macOS adaptive tile UX are not feature-identical.
+          Real Windows/macOS GUI testing, Finder/File Explorer drag/drop and real-media move acceptance remain unverified.
           Use for controlled beta testing only. This release is NOT authorized for production catalog activation.
           See BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json for final per-file SHA-256 and size.
           EOF
@@ -269,6 +360,7 @@ jobs:
           gh release upload "$TAG" \
             distribution/BKE-Media-Organizer-macOS-ARM64.dmg \
             distribution/BKE-Media-Organizer-macOS-ARM64.zip \
+            distribution/BKE-Media-Organizer-Windows-x64.zip \
             distribution/BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json \
             --repo "$GITHUB_REPOSITORY"
           mkdir -p /tmp/released
@@ -296,11 +388,12 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /tmp/published.json
           jq -e --arg tag "$TAG" '
              .tag_name == $tag and .prerelease == true and .draft == false
-             and (.assets | length) == 3
+             and (.assets | length) == 4
              and ([.assets[].name] | sort) ==
                (["BKE-Media-Organizer-PREPRODUCTION-MANIFEST.json",
                  "BKE-Media-Organizer-macOS-ARM64.dmg",
-                 "BKE-Media-Organizer-macOS-ARM64.zip"] | sort)' /tmp/published.json >/dev/null
+                 "BKE-Media-Organizer-macOS-ARM64.zip",
+                 "BKE-Media-Organizer-Windows-x64.zip"] | sort)' /tmp/published.json >/dev/null
           status="$(curl -sS -o /tmp/latest.json -w '%{http_code}' \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest")"
@@ -315,4 +408,4 @@ jobs:
           trap - EXIT
           echo "### Media Organizer PREPRODUCTION publication: PASS" >> "$GITHUB_STEP_SUMMARY"
           echo "Source: @$SOURCE_SHA, run $RUN_ID attempt $RUN_ATTEMPT, artifact $ARTIFACT_ID" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tag: $TAG — prerelease, NOT production-ready, AD_HOC_ONLY" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag: $TAG — prerelease, NOT production-ready, macOS AD_HOC_ONLY, Windows UNSIGNED" >> "$GITHUB_STEP_SUMMARY"
